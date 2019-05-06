@@ -13,6 +13,8 @@ import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodTemplateSpec;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
+import io.fabric8.kubernetes.api.model.ServicePort;
+import io.fabric8.kubernetes.api.model.ServiceSpec;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.api.model.apps.StatefulSetBuilder;
@@ -312,28 +314,43 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         /*
         * TODO - Don't include fields with null values in the status
         *      - Block until endpoints are ready
+        *      - make sure it reconciles upon update
         * */
         Future<ReconciliationState> kafkaUpdateStatusListeners() {
 
             Future<ReconciliationState> result = Future.future();
             //vertx.executeBlocking(fut -> {
+            //compose
             vertx.createSharedWorkerExecutor("kubernetes-ops-pool").<ReconciliationState>executeBlocking(
                 future -> {
                     try {
                         String internalBootstrapHost = null;
                         String externalBootstrapHost = null;
 
-                        if (serviceOperations.get(namespace, kafkaCluster.internalBootstrapServiceName(name)) != null) {
-                            internalBootstrapHost = serviceOperations.get(namespace, kafkaCluster.internalBootstrapServiceName(name)).getSpec().getClusterIP();
+                        ListenersStatus ls = new ListenersStatus();
+
+                        Service bootstrapService = serviceOperations.get(namespace, kafkaCluster.internalBootstrapServiceName(name));
+                        if (bootstrapService != null) {
+                            ServiceSpec bootstrapSpec =  bootstrapService.getSpec();
+                            internalBootstrapHost = bootstrapSpec.getClusterIP();
+                            for (ServicePort sp : bootstrapSpec.getPorts()) {
+                                if (sp.getPort() == kafkaCluster.getClientPort()) {
+                                    ls.setPlain(new ListenerStatus(internalBootstrapHost, kafkaCluster.getClientPort(), null));
+                                }
+                                if (sp.getPort() == kafkaCluster.getClientTlsPort()) {
+                                    ls.setTls(new ListenerStatus(internalBootstrapHost, kafkaCluster.getClientTlsPort(), null));
+                                }
+                            }
                         }
-                        if (serviceOperations.get(namespace, kafkaCluster.externalBootstrapServiceName(name)) != null) {
-                            externalBootstrapHost = serviceOperations.get(namespace, kafkaCluster.externalBootstrapServiceName(name)).getSpec().getClusterIP();
+
+                        bootstrapService = serviceOperations.get(namespace, kafkaCluster.externalBootstrapServiceName(name));
+                        if (bootstrapService != null) {
+                            for (ServicePort sp : bootstrapService.getSpec().getPorts()) {
+                                if (sp.getPort() == kafkaCluster.getClientPort()) {
+                                    ls.setExternal(new ListenerStatus(externalBootstrapHost, kafkaCluster.getExternalPort(), null));
+                                }
+                            }
                         }
-                        ListenersStatus ls = new ListenersStatus(
-                                new ListenerStatus(internalBootstrapHost, kafkaCluster.getClientPort(), null),
-                                new ListenerStatus(internalBootstrapHost, kafkaCluster.getClientTlsPort(), null),
-                                new ListenerStatus(externalBootstrapHost, kafkaCluster.getExternalPort(), null), null
-                        );
 
                         Kafka k1 = crdOperator.get(namespace, name);
                         log.info("TEST1: {} ", k1.toString());
@@ -347,7 +364,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                 }, true,
                 result.completer()
             );
-            return result;
+            return withVoid(result);
         }
 
         /**
